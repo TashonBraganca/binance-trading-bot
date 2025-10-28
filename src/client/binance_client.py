@@ -39,7 +39,7 @@ class BinanceClient:
     async def close(self):
         """Closes the client connection."""
         if self.client:
-            await self.client.close()
+            await self.client.close_connection()
             app_log.info("Binance client connection closed.")
 
     async def _execute_request(self, method, *args, **kwargs):
