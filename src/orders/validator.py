@@ -38,6 +38,7 @@ class OrderValidator:
 
     async def _run_check(self, check_func, order_data):
         """Helper to run sync or async validation functions."""
+        app_log.debug(f"Running validation check: {check_func.__name__}")
         try:
             # Await if the check function is async (like risk manager)
             if asyncio.iscoroutinefunction(check_func):
@@ -45,6 +46,7 @@ class OrderValidator:
             else:
                 result = check_func(order_data)
             
+            app_log.debug(f"Validation check {check_func.__name__} result: {result}")
             if not result:
                 errors_log.warning(f"Validation failed: {check_func.__name__}")
             return result
