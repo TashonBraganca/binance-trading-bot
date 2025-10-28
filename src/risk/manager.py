@@ -30,16 +30,11 @@ class RiskManager:
         except Exception as e:
             errors_log.error(f"Failed to update risk manager state: {e}")
 
-    def get_current_price(self, symbol: str) -> Decimal | None:
-        """Gets the last known price for a symbol."""
-        # This should be updated by a real-time price feed
-        # For now, we'll fetch it via REST for validation purposes
-        # This is slow and should be used sparingly
-        # A proper implementation would use the websocket stream
-        # and store prices in self.current_prices
-        # Placeholder implementation:
-        # return self.current_prices.get(symbol)
-        return None # Force notional check to fetch price for now
+    async def get_current_price(self, symbol: str) -> Decimal | None:
+        """Gets the last known price for a symbol from cache, or fetches it."""
+        if symbol in self.current_prices:
+            return self.current_prices[symbol]
+        return await self._fetch_current_price(symbol)
 
     async def pre_trade_check(self, order_data: dict) -> bool:
         """Performs all pre-trade risk checks."""

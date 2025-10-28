@@ -119,7 +119,16 @@ class OrderValidator:
             if usdt_balance:
                 available_balance = Decimal(usdt_balance['availableBalance'])
                 # A rough estimation of cost
-                price = Decimal(str(order_data.get('price'))) if 'price' in order_data else self.risk_manager.get_current_price(order_data['symbol'])
+                price = None
+                if 'price' in order_data and order_data['price'] > 0:
+                    price = Decimal(str(order_data['price']))
+                else:
+                    price = await self.risk_manager.get_current_price(order_data['symbol'])
+                
+                if not price:
+                    app_log.warning(f"Could not retrieve current price for {order_data['symbol']} to validate balance.")
+                    return False
+
                 estimated_cost = (Decimal(str(order_data['quantity'])) * price) / Decimal(str(order_data.get('leverage', 1)))
 
                 if available_balance < estimated_cost:
