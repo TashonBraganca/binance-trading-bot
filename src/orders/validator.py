@@ -98,7 +98,7 @@ class OrderValidator:
         
         if 'MIN_NOTIONAL' in filters:
             min_notional = Decimal(filters['MIN_NOTIONAL']['notional'])
-            price = Decimal(str(order_data.get('price'))) if 'price' in order_data else self.risk_manager.get_current_price(symbol)
+            price = Decimal(str(order_data.get('price'))) if 'price' in order_data else await self.risk_manager.get_current_price(symbol)
             if not price:
                 app_log.warning(f"Could not retrieve current price for {symbol} to validate notional.")
                 return False # Or True, depending on strictness
