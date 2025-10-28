@@ -91,7 +91,7 @@ class OrderValidator:
                 return False
         return True
 
-    def _validate_notional(self, order_data: dict) -> bool:
+    async def _validate_notional(self, order_data: dict) -> bool:
         """Validates if the order notional is above the minimum."""
         symbol = order_data['symbol']
         filters = self._get_symbol_filters(symbol)
