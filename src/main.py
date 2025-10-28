@@ -78,8 +78,14 @@ async def place_order_flow(bot: TradingBot):
     console.print("[green]✓ Leverage: SAFE[/green]")
 
     if Prompt.ask("Confirm order? [y/N]", choices=["y", "n"], default="n").lower() == 'y':
-        await bot.order_executor.execute_order(order_data)
-        console.print("[green]Order placed![/green]")
+        result = await bot.order_executor.execute_order(order_data)
+        if result and result.get("status") not in ["REJECTED", "FAILED"]:
+            console.print(f"[green]Order successfully placed! Status: {result.get('status')}[/green]")
+            console.print(result)
+        else:
+            error_msg = result.get('error', 'No error message provided.')
+            console.print(f"[bold red]Order placement failed: {error_msg}[/bold red]")
+            console.print(f"[red]Details: {result}[/red]")
     else:
         console.print("[yellow]Order cancelled.[/yellow]")
 
