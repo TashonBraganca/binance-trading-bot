@@ -1,146 +1,139 @@
+import math
+from typing import Dict, Any, Optional
 
-from decimal import Decimal, InvalidOperation
-from src.utils.logger import app_log, errors_log
+from src.client.binance_client import BinanceClient
+from src.config.constants import OrderSide, OrderType
+from src.utils.logger import main_logger, errors_logger
+from src.utils.validators import is_valid_symbol, is_positive_number
 
 class OrderValidator:
-    """Performs pre-execution validation of order parameters."""
+    def __init__(self, binance_client: BinanceClient):
+        self.binance_client = binance_client
+        self.exchange_info = self._load_exchange_info()
 
-    def __init__(self, binance_client, risk_manager):
-        self.client = binance_client
-        self.risk_manager = risk_manager
-        self.exchange_info = None
-
-    async def load_exchange_info(self):
-        """Loads and caches exchange information."""
-        app_log.info("Loading exchange information for validation...")
-        self.exchange_info = await self.client.get_exchange_info()
-        app_log.info("Exchange information loaded.")
-
-    async def validate_order(self, order_data: dict) -> bool:
-        """Runs all validation checks for a given order."""
-        if not self.exchange_info:
-            await self.load_exchange_info()
-
-        checks = [
-            self._validate_symbol,
-            self._validate_price_and_quantity,
-            self._validate_notional,
-            self._validate_balance,
-            self.risk_manager.pre_trade_check # This is an async method
-        ]
-
-        for check in checks:
-            is_valid = await self._run_check(check, order_data)
-            if not is_valid:
-                return False
-        
-        return True
-
-    async def _run_check(self, check_func, order_data):
-        """Helper to run sync or async validation functions."""
-        app_log.debug(f"Running validation check: {check_func.__name__}")
+    def _load_exchange_info(self) -> Dict[str, Any]:
         try:
-            # Await if the check function is async (like risk manager)
-            if asyncio.iscoroutinefunction(check_func):
-                result = await check_func(order_data)
-            else:
-                result = check_func(order_data)
-            
-            app_log.debug(f"Validation check {check_func.__name__} result: {result}")
-            if not result:
-                errors_log.warning(f"Validation failed: {check_func.__name__}")
-            return result
+            info = self.binance_client.get_exchange_info()
+            symbols_info = {s['symbol']: s for s in info['symbols']}
+            main_logger.info("Exchange info loaded successfully.")
+            return symbols_info
         except Exception as e:
-            errors_log.error(f"Error during validation check {check_func.__name__}: {e}")
+            errors_logger.error(f"Failed to load exchange info: {e}")
+            return {}
+
+    def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        return self.exchange_info.get(symbol)
+
+    def validate_order_params(self, symbol: str, side: OrderSide, order_type: OrderType, quantity: float, price: float = None) -> bool:
+        if not is_valid_symbol(symbol):
+            main_logger.warning(f"Validation failed: Invalid symbol {symbol}")
             return False
 
-    def _validate_symbol(self, order_data: dict) -> bool:
-        """Validates if the symbol exists and is tradeable."""
-        symbol = order_data['symbol']
-        symbols = {s['symbol'] for s in self.exchange_info['symbols']}
-        if symbol not in symbols:
-            app_log.warning(f"Validation failed: Symbol '{symbol}' not found.")
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            main_logger.warning(f"Validation failed: Symbol {symbol} not found in exchange info.")
             return False
-        return True
 
-    def _get_symbol_filters(self, symbol: str) -> dict:
-        """Retrieves the filters for a specific symbol."""
-        for s in self.exchange_info['symbols']:
-            if s['symbol'] == symbol:
-                return {f['filterType']: f for f in s['filters']}
-        return {}
+        if not is_positive_number(quantity):
+            main_logger.warning(f"Validation failed: Quantity must be a positive number. Got {quantity}")
+            return False
 
-    def _validate_price_and_quantity(self, order_data: dict) -> bool:
-        """Validates price and quantity against symbol filters (tick size, step size)."""
-        symbol = order_data['symbol']
-        filters = self._get_symbol_filters(symbol)
+        step_size = 0.0
+        tick_size = 0.0
+        min_notional = 0.0
 
-        # Validate price for limit orders
-        if 'price' in order_data:
-            price = Decimal(str(order_data['price']))
-            if 'PRICE_FILTER' in filters:
-                tick_size = Decimal(filters['PRICE_FILTER']['tickSize'])
-                if (price % tick_size) != 0:
-                    app_log.warning(f"Validation failed: Price {price} does not match tick size {tick_size} for {symbol}.")
-                    return False
+        for f in symbol_info['filters']:
+            if f['filterType'] == 'LOT_SIZE':
+                step_size = float(f['stepSize'])
+            elif f['filterType'] == 'PRICE_FILTER':
+                tick_size = float(f['tickSize'])
+            elif f['filterType'] == 'MIN_NOTIONAL':
+                min_notional = float(f.get('minNotional', 0.0))
 
-        # Validate quantity
-        quantity = Decimal(str(order_data['quantity']))
-        if 'LOT_SIZE' in filters:
-            step_size = Decimal(filters['LOT_SIZE']['stepSize'])
-            if (quantity % step_size) != 0:
-                app_log.warning(f"Validation failed: Quantity {quantity} does not match step size {step_size} for {symbol}.")
+        if step_size == 0.0:
+            main_logger.warning(f"Validation failed: Could not find LOT_SIZE filter for {symbol}")
+            return False
+
+        # Validate quantity precision using math.isclose
+        # Check if quantity is a multiple of step_size
+        if not math.isclose(quantity % step_size, 0.0, abs_tol=1e-12):
+            main_logger.warning(f"Validation failed: Quantity {quantity} does not match step size {step_size} for {symbol}")
+            return False
+
+        if order_type in [OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.TAKE_PROFIT_LIMIT]:
+            if not is_positive_number(price):
+                main_logger.warning(f"Validation failed: Price must be a positive number for {order_type} orders. Got {price}")
                 return False
-        return True
+            if tick_size == 0.0:
+                main_logger.warning(f"Validation failed: Could not find PRICE_FILTER for {symbol}")
+                return False
+            # Validate price precision using math.isclose
+            # Check if price is a multiple of tick_size
+            if not math.isclose(price % tick_size, 0.0, abs_tol=1e-12):
+                main_logger.warning(f"Validation failed: Price {price} does not match tick size {tick_size} for {symbol}")
+                return False
 
-    async def _validate_notional(self, order_data: dict) -> bool:
-        """Validates if the order notional is above the minimum."""
-        symbol = order_data['symbol']
-        filters = self._get_symbol_filters(symbol)
-        
-        if 'MIN_NOTIONAL' in filters:
-            min_notional = Decimal(filters['MIN_NOTIONAL']['notional'])
-            price = Decimal(str(order_data.get('price'))) if 'price' in order_data else await self.risk_manager.get_current_price(symbol)
-            if not price:
-                app_log.warning(f"Could not retrieve current price for {symbol} to validate notional.")
-                return False # Or True, depending on strictness
-            
-            notional_value = Decimal(str(order_data['quantity'])) * price
+        # CRITICAL: Validate minimum notional value
+        # This ensures the order value meets Binance's minimum requirements
+        if min_notional > 0.0:
+            effective_price = price if price else self._get_current_price(symbol)
+            if effective_price <= 0:
+                main_logger.warning(f"Validation failed: Cannot determine current price for {symbol} to validate notional value")
+                return False
+
+            notional_value = quantity * effective_price
             if notional_value < min_notional:
-                app_log.warning(f"Validation failed: Notional value {notional_value} is below min notional {min_notional} for {symbol}.")
+                main_logger.warning(
+                    f"Validation failed: Order notional value {notional_value:.2f} USDT "
+                    f"is below minimum {min_notional:.2f} USDT for {symbol}"
+                )
                 return False
+
         return True
 
-    async def _validate_balance(self, order_data: dict) -> bool:
-        """Checks if there is sufficient balance for the order."""
-        # This is a simplified check. A more robust check would calculate required margin.
+    def _get_current_price(self, symbol: str) -> float:
+        """Fetch current market price for a symbol (for market order notional validation)."""
         try:
-            balance_data = await self.client.get_account_balance()
-            usdt_balance = next((b for b in balance_data if b['asset'] == 'USDT'), None)
-            
-            if usdt_balance:
-                available_balance = Decimal(usdt_balance['availableBalance'])
-                # A rough estimation of cost
-                price = None
-                if 'price' in order_data and order_data['price'] > 0:
-                    price = Decimal(str(order_data['price']))
-                else:
-                    price = await self.risk_manager.get_current_price(order_data['symbol'])
-                
-                if not price:
-                    app_log.warning(f"Could not retrieve current price for {order_data['symbol']} to validate balance.")
-                    return False
-
-                estimated_cost = (Decimal(str(order_data['quantity'])) * price) / Decimal(str(order_data.get('leverage', 1)))
-
-                if available_balance < estimated_cost:
-                    app_log.warning(f"Validation failed: Insufficient available balance. Need ~{estimated_cost:.2f}, have {available_balance:.2f}.")
-                    return False
-            else:
-                app_log.warning("Could not find USDT balance information.")
-                return False
+            ticker = self.binance_client.get_ticker_24hr(symbol)
+            if ticker:
+                return float(ticker.get('lastPrice', 0.0))
         except Exception as e:
-            errors_log.error(f"Error validating balance: {e}")
+            main_logger.warning(f"Failed to get current price for {symbol}: {e}")
+        return 0.0
+
+    def validate_sufficient_balance(self, symbol: str, side: OrderSide, order_type: OrderType, quantity: float, price: float = None) -> bool:
+        # This is a simplified check. A real system would need to consider:
+        # - Margin requirements for futures (initial margin, maintenance margin)
+        # - Leverage settings
+        # - Cross vs Isolated margin
+        # - Open orders that consume margin
+
+        try:
+            account_info = self.binance_client.get_account_information()
+            # Assuming USDT as the quote asset for simplicity in futures
+            usdt_balance = next((a['availableBalance'] for a in account_info['assets'] if a['asset'] == 'USDT'), 0.0)
+            usdt_balance = float(usdt_balance)
+
+            if order_type == OrderType.MARKET:
+                # For market orders, estimate cost based on current price if possible
+                # Or simply check if available balance is sufficient for the quantity
+                # This is a very rough estimate for market orders
+                if quantity > usdt_balance: # Simplified: assuming quantity is in USDT for market buy
+                    main_logger.warning(f"Insufficient balance for market order. Required: {quantity}, Available: {usdt_balance}")
+                    return False
+            elif order_type == OrderType.LIMIT:
+                if price is None:
+                    main_logger.warning("Price is required for limit order balance validation.")
+                    return False
+                cost = quantity * price
+                if cost > usdt_balance:
+                    main_logger.warning(f"Insufficient balance for limit order. Required: {cost}, Available: {usdt_balance}")
+                    return False
+            
+            # Add more complex margin calculations for futures here
+            # For now, a basic check against available balance
+
+            return True
+        except Exception as e:
+            errors_logger.error(f"Error validating sufficient balance: {e}")
             return False
-        return True
-import asyncio
