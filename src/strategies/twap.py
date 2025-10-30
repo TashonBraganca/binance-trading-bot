@@ -1,65 +1,86 @@
+import time
+import math
+from typing import Optional
 
-import asyncio
-from decimal import Decimal
 from src.strategies.base import BaseStrategy
-from src.utils.logger import app_log, orders_log
-from src.config.constants import OrderSide
+from src.orders.types import Order, OrderSide, OrderType, TimeInForce
+from src.utils.logger import main_logger, orders_logger, errors_logger
 
 class TWAPStrategy(BaseStrategy):
-    """
-    Splits a large order into smaller chunks executed over a specified time period
-    to minimize market impact.
-    """
+    def __init__(self, binance_client, order_executor, risk_manager, portfolio_tracker):
+        super().__init__(binance_client, order_executor, risk_manager, portfolio_tracker)
+        self.strategy_name = "TWAP"
 
-    def __init__(self, bot):
-        super().__init__(bot, "TWAP")
-
-    async def run(self, symbol: str, total_quantity: Decimal, duration_minutes: int, side: OrderSide):
+    def execute(self, symbol: str, total_quantity: float, duration_minutes: int, side: OrderSide, 
+                interval_seconds: int = 60, leverage: int = 1) -> bool:
         """
-        Executes the TWAP strategy.
-
-        :param symbol: The trading symbol (e.g., 'BTCUSDT').
-        :param total_quantity: The total amount of the asset to buy or sell.
-        :param duration_minutes: The total duration over which to execute the order.
-        :param side: The order side (OrderSide.BUY or OrderSide.SELL).
+        Executes a TWAP order.
+        :param symbol: Trading pair (e.g., BTCUSDT)
+        :param total_quantity: Total quantity to trade
+        :param duration_minutes: Total duration over which to execute the order in minutes
+        :param side: BUY or SELL
+        :param interval_seconds: Interval between child orders in seconds (default: 60s)
+        :param leverage: Leverage to use for the order
+        :return: True if strategy initiated successfully, False otherwise
         """
-        app_log.info(f"Starting TWAP strategy for {side.value} {total_quantity} {symbol} over {duration_minutes} minutes.")
+        if not self.is_active:
+            main_logger.warning(f"{self.strategy_name} strategy is not active. Start it first.")
+            return False
 
-        # For simplicity, we'll use a fixed number of chunks. A more advanced
-        # implementation could make this dynamic.
-        num_chunks = 10
-        if duration_minutes < 1:
-            num_chunks = 1 # Execute in a single order if duration is very short
+        if duration_minutes <= 0 or total_quantity <= 0 or interval_seconds <= 0:
+            errors_logger.error("Invalid TWAP parameters: duration, quantity, or interval must be positive.")
+            return False
+
+        num_orders = math.ceil((duration_minutes * 60) / interval_seconds)
+        if num_orders == 0: # Handle case where duration is less than interval
+            num_orders = 1
         
-        chunk_quantity = total_quantity / Decimal(num_chunks)
-        interval_seconds = (duration_minutes * 60) / num_chunks
+        quantity_per_order = total_quantity / num_orders
 
-        app_log.info(f"TWAP plan: {num_chunks} chunks of {chunk_quantity:.4f} {symbol} every {interval_seconds:.2f} seconds.")
+        main_logger.info(f"Initiating TWAP for {symbol}: Total {total_quantity} {side.value} over {duration_minutes} mins in {num_orders} orders of {quantity_per_order:.4f} every {interval_seconds}s")
 
-        executed_quantity = Decimal('0')
-        for i in range(num_chunks):
-            try:
-                order_data = {
-                    "symbol": symbol,
-                    "side": side.value,
-                    "type": "MARKET",
-                    "quantity": float(chunk_quantity), # python-binance requires float for quantity
-                }
-                
-                order_result = await self.bot.order_executor.execute_order(order_data)
-                
-                if order_result and order_result.get('status') in ['FILLED', 'PARTIALLY_FILLED']:
-                    filled_qty = Decimal(order_result.get('executedQty', '0'))
-                    executed_quantity += filled_qty
-                    orders_log.info(f"TWAP chunk {i+1}/{num_chunks} filled for {filled_qty} {symbol}. Total filled: {executed_quantity}")
-                else:
-                    orders_log.warning(f"TWAP chunk {i+1}/{num_chunks} failed or was not filled: {order_result}")
+        start_time = time.time()
+        for i in range(num_orders):
+            if not self.is_active:
+                main_logger.info(f"{self.strategy_name} strategy stopped during execution.")
+                return False
 
-            except Exception as e:
-                orders_log.error(f"Error executing TWAP chunk {i+1}/{num_chunks}: {e}")
+            current_price = self.get_current_price(symbol)
+            if current_price == 0.0:
+                errors_logger.error(f"Could not get current price for {symbol}. Skipping TWAP child order.")
+                time.sleep(interval_seconds)
+                continue
 
-            if i < num_chunks - 1: # Don't wait after the last chunk
-                await asyncio.sleep(interval_seconds)
-        
-        app_log.info(f"TWAP strategy finished. Total executed quantity: {executed_quantity}/{total_quantity}")
-        # Here you could add reporting on execution quality vs. benchmark (e.g., VWAP)
+            # Pre-trade risk check
+            temp_order = Order(symbol=symbol, side=side, order_type=OrderType.MARKET, quantity=quantity_per_order)
+            if not self.risk_manager.pre_trade_check(temp_order, current_price, leverage, self.portfolio_tracker.get_open_positions_list()):
+                main_logger.warning(f"TWAP child order {i+1}/{num_orders} for {symbol} rejected by risk manager.")
+                # Depending on policy, could stop TWAP or just skip this order
+                time.sleep(interval_seconds)
+                continue
+
+            order = Order(
+                symbol=symbol,
+                side=side,
+                order_type=OrderType.MARKET, # TWAP typically uses market orders
+                quantity=quantity_per_order,
+                client_order_id=f"TWAP_{symbol}_{int(time.time())}_{i}"
+            )
+            executed_order = self.order_executor.place_order(order)
+
+            if executed_order and executed_order.status == "FILLED":
+                orders_logger.info(f"TWAP child order {i+1}/{num_orders} for {symbol} executed. Qty: {executed_order.filled_quantity}, Avg Price: {executed_order.avg_fill_price}")
+            else:
+                errors_logger.error(f"TWAP child order {i+1}/{num_orders} for {symbol} failed or not filled.")
+            
+            if i < num_orders - 1:
+                time_to_wait = interval_seconds - (time.time() - start_time) % interval_seconds
+                if time_to_wait > 0:
+                    time.sleep(time_to_wait)
+
+        main_logger.info(f"TWAP strategy for {symbol} completed.")
+        return True
+
+    def run(self):
+        """TWAP strategy is executed via the `execute` method, not a continuous run loop."""
+        main_logger.warning("TWAP strategy does not have a continuous run loop. Use .execute() method.")

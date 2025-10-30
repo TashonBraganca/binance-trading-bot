@@ -1,81 +1,61 @@
-
 # Binance Futures Testnet Setup Guide
 
-This guide will walk you through setting up a Binance Futures Testnet account and configuring the bot to connect to it.
+## Step 1: Create Testnet Account
 
-## Step 1: Create a Testnet Account
+1. Visit: https://testnet.binancefuture.com
+2. Click "Register" (top-right)
+3. Complete registration (email + password)
+4. Verify email address
 
-1.  **Go to the Testnet Website:** Open your web browser and navigate to [https://testnet.binancefuture.com](https://testnet.binancefuture.com).
-2.  **Register:** Click on "Register" and create a new account. This account is separate from your real Binance account and uses test funds only.
-3.  **Verify Your Email:** Complete the registration process by verifying your email address.
+## Step 2: Generate API Credentials
 
-## Step 2: Get Testnet Funds
+1. Login to testnet
+2. Click your profile icon → "API Management"
+3. Click "Create API"
+4. Name it: "Trading Bot"
+5. Complete 2FA verification
+6. **SAVE YOUR API KEY & SECRET** (secret shown once only)
 
-Once logged in, your account should be automatically credited with testnet assets (like USDT, BTC, ETH). If you need more, look for a "Faucet" or "Add Assets" button on the testnet interface to get more free test funds.
+## Step 3: Enable Futures Trading
 
-## Step 3: Generate API Credentials
+1. On testnet dashboard, click "Activate" for Futures
+2. You'll receive 10,000 USDT testnet balance
+3. Navigate to "Futures" section to verify
 
-1.  **Navigate to API Management:** While logged into the testnet site, find your user profile icon and click on "API Management".
-2.  **Create a New API Key:**
-    *   Give your API key a label, for example, `trading-bot`.
-    *   Click "Create API".
-    *   Complete any security verification required (2FA, email).
-3.  **Save Your Keys:**
-    *   Binance will now display your **API Key** and **Secret Key**.
-    *   **IMPORTANT:** The Secret Key is shown only once. Copy both keys and save them somewhere secure immediately. You will need them in the next step.
-4.  **Check Restrictions:** For this bot, ensure that "Enable Futures" is checked. For security, you can leave "Enable Withdrawals" unchecked.
+## Step 4: Configure Bot
 
-## Step 4: Configure The Bot
+```bash
+# Create .env file
+cp .env.example .env
 
-1.  **Clone the Repository:** If you haven't already, clone the bot's source code to your local machine.
-    ```bash
-    git clone https://github.com/your-repo/binance-trading-bot.git
-    cd binance-trading-bot
-    ```
+# Edit .env
+BINANCE_API_KEY=your_api_key_here
+BINANCE_API_SECRET=your_secret_key_here
+TESTNET=True
+```
 
-2.  **Create the Environment File:** In the root directory of the project, you will find a file named `.env.example`. Make a copy of this file and name it `.env`.
-    ```bash
-    # On Windows
-    copy .env.example .env
+## Step 5: Test Connection
 
-    # On macOS / Linux
-    cp .env.example .env
-    ```
+```bash
+python src/main.py --test-connection
+```
 
-3.  **Edit the `.env` File:** Open the new `.env` file in a text editor. You will see the following content:
-    ```
-    BINANCE_API_KEY="YOUR_API_KEY"
-    BINANCE_API_SECRET="YOUR_API_SECRET"
-
-    # Set to True for testnet, False for mainnet
-    TESTNET=True
-    ```
-    *   Replace `YOUR_API_KEY` with the API Key you saved from Binance.
-    *   Replace `YOUR_API_SECRET` with the Secret Key you saved.
-    *   Ensure `TESTNET` is set to `True`.
-
-## Step 5: Install Dependencies and Run
-
-1.  **Install Python packages:** Make sure you have Python 3.9 or newer installed. Then, run the following command in the project's root directory:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-2.  **Run the bot:**
-    ```bash
-    python src/main.py
-    ```
-
-If everything is configured correctly, you should see the bot's main menu appear in your terminal, showing a connection to the TESTNET account.
+Should output:
+```
+✓ API connection successful
+✓ Account balance: 10,000 USDT
+✓ Testnet mode: ACTIVE
+```
 
 ## Troubleshooting
 
-*   **Error: Invalid API Key:**
-    *   Double-check that the API Key and Secret in your `.env` file are copied exactly, with no extra spaces or characters.
-    *   Ensure the API key is not restricted by IP address on the Binance website (unless you have configured a static IP).
+**Error: Invalid API Key**
+- Verify key copied correctly (no spaces)
+- Ensure API Management shows "Enabled"
 
-*   **Error: Timestamp for this request is outside of the recvWindow:**
-    *   This means your computer's system clock is out of sync with Binance's servers. You need to synchronize it. On most operating systems, you can do this through your Date & Time settings by enabling automatic time synchronization with an internet time server.
+**Error: Timestamp Error**
+- Your system time is off
+- Run: `sudo ntpdate -s time.nist.gov` (Linux/Mac)
 
-*   **Error: Insufficient Balance:**
-    *   Make sure you have sufficient testnet funds in your Futures wallet on the Binance Testnet website.
+**Error: Insufficient Balance**
+- Request more testnet funds: https://testnet.binancefuture.com/en/support

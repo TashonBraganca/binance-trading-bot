@@ -1,103 +1,137 @@
-
-import asyncio
+import websocket
 import json
-import websockets
-from src.config.settings import settings
-from src.utils.logger import app_log, errors_log
+import threading
+import time
+from typing import Dict, Any, Callable, Optional
 
-class WebsocketClient:
-    """Handles real-time data streams from Binance Futures via WebSockets."""
+from src.config.constants import BINANCE_FUTURES_TESTNET_WEBSOCKET_URL
+from src.utils.logger import main_logger, errors_logger
 
-    def __init__(self, message_handler):
-        self.ws_url = settings.websocket_url
-        self.message_handler = message_handler
-        self.ws = None
+class WebSocketClient:
+    def __init__(self, streams: Dict[str, Callable[[Dict[str, Any]], None]]):
+        self.base_url = BINANCE_FUTURES_TESTNET_WEBSOCKET_URL
+        self.streams = streams  # {stream_name: callback_function}
+        self.ws: Optional[websocket.WebSocketApp] = None
         self.is_running = False
-        self.reconnect_attempts = 0
+        self.reconnect_interval = 5  # seconds
+        self.last_ping_time = time.time()
+        self.ping_interval = 30  # Send a ping every 30 seconds
 
-    async def _connect(self):
-        """Establishes a connection to the WebSocket server."""
-        app_log.info("Connecting to WebSocket...")
-        try:
-            self.ws = await websockets.connect(self.ws_url + '/ws/!bookTicker') # Example stream
-            app_log.info("WebSocket connection established.")
-            self.reconnect_attempts = 0
-            return True
-        except Exception as e:
-            errors_log.error(f"WebSocket connection failed: {e}")
-            return False
+    def _on_open(self, ws):
+        main_logger.info("WebSocket connection opened.")
+        self._subscribe_to_streams()
 
-    async def start(self):
-        """Starts the WebSocket client and handles reconnection."""
-        self.is_running = True
-        while self.is_running:
-            if await self._connect():
-                await self._listen()
-            
-            if not self.is_running: # Check if stop was called during listen
-                break
+    def _on_message(self, ws, message):
+        data = json.loads(message)
+        stream_name = data.get("stream")
+        if stream_name and stream_name in self.streams:
+            self.streams[stream_name](data.get("data"))
+        else:
+            main_logger.debug(f"Received unhandled WebSocket message: {data}")
+        self.last_ping_time = time.time() # Reset ping time on any message
 
-            self.reconnect_attempts += 1
-            delay = min(self.reconnect_attempts * 5, 60) # Exponential backoff with a max delay
-            app_log.warning(f"WebSocket disconnected. Attempting to reconnect in {delay} seconds...")
-            await asyncio.sleep(delay)
+    def _on_error(self, ws, error):
+        errors_logger.error(f"WebSocket error: {error}")
 
-    async def _listen(self):
-        """Listens for incoming messages from the WebSocket."""
-        try:
-            while self.is_running:
-                message = await self.ws.recv()
-                data = json.loads(message)
-                await self.message_handler(data)
-        except websockets.exceptions.ConnectionClosed as e:
-            errors_log.warning(f"WebSocket connection closed unexpectedly: {e}")
-        except Exception as e:
-            errors_log.error(f"An error occurred in the WebSocket listener: {e}")
+    def _on_close(self, ws, close_status_code, close_msg):
+        main_logger.warning(f"WebSocket connection closed. Status: {close_status_code}, Message: {close_msg}")
+        if self.is_running:
+            main_logger.info(f"Attempting to reconnect in {self.reconnect_interval} seconds...")
+            time.sleep(self.reconnect_interval)
+            self._connect_websocket()
 
-    async def stop(self):
-        """Stops the WebSocket client."""
-        app_log.info("Stopping WebSocket client...")
-        self.is_running = False
-        if self.ws:
-            await self.ws.close()
-            app_log.info("WebSocket connection closed by user.")
-
-    async def subscribe_to_streams(self, streams: list):
-        """Subscribes to a list of WebSocket streams."""
+    def _subscribe_to_streams(self):
         if not self.ws:
-            app_log.warning("WebSocket not connected. Cannot subscribe to streams.")
             return
 
-        request = {
-            "method": "SUBSCRIBE",
-            "params": streams,
-            "id": 1
-        }
-        await self.ws.send(json.dumps(request))
-        app_log.info(f"Subscribed to streams: {streams}")
-
-# Example message handler
-async def handle_message(data):
-    # In a real application, this would update market data, trigger strategies, etc.
-    # For now, we just log the message.
-    app_log.debug(f"Received WebSocket message: {data}")
-
-if __name__ == '__main__':
-    # Example usage
-    async def main():
-        ws_client = WebsocketClient(handle_message)
-        # Start the client in the background
-        asyncio.create_task(ws_client.start())
+        # Binance WebSocket API uses a single connection for multiple streams
+        # The stream names are part of the URL path, e.g., /ws/btcusdt@kline_1m/ethusdt@depth
+        # For simplicity, we'll assume each stream is a separate connection for now
+        # or that the user provides a combined stream URL.
+        # A more robust solution would combine streams into one connection.
         
-        # Subscribe to streams after a short delay to ensure connection
-        await asyncio.sleep(2)
-        await ws_client.subscribe_to_streams(["btcusdt@kline_1m", "ethusdt@depth"])
+        # For this implementation, we expect the 'streams' dict keys to be the full stream path
+        # e.g., {'btcusdt@kline_1m': callback_func}
+        # The actual connection URL will be constructed based on these.
+        
+        # If multiple streams are provided, we need to combine them into a single URL
+        # Example: wss://stream.binancefuture.com/stream?streams=btcusdt@kline_1m/ethusdt@depth
+        
+        # This current setup assumes individual stream connections or a pre-combined URL.
+        # Let's refine this to support multiple streams on a single connection.
+        
+        stream_paths = list(self.streams.keys())
+        if not stream_paths:
+            main_logger.warning("No streams provided to subscribe.")
+            return
 
-        # Keep the main task running
-        try:
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            await ws_client.stop()
+        # Construct the combined stream URL
+        combined_stream_url = f"{self.base_url}/stream?streams={'/'.join(stream_paths)}"
+        main_logger.info(f"Subscribing to combined WebSocket stream: {combined_stream_url}")
+        
+        # Re-initialize WebSocketApp with the combined URL
+        self.ws = websocket.WebSocketApp(
+            combined_stream_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close
+        )
+        # Note: _on_open will be called again, which will re-subscribe. This is fine.
+        # The actual subscription happens implicitly by connecting to the stream URL.
 
-    asyncio.run(main())
+    def _connect_websocket(self):
+        stream_paths = list(self.streams.keys())
+        if not stream_paths:
+            errors_logger.error("Cannot connect WebSocket: No streams provided.")
+            return
+
+        combined_stream_url = f"{self.base_url}/stream?streams={'/'.join(stream_paths)}"
+        main_logger.info(f"Connecting to WebSocket: {combined_stream_url}")
+
+        self.ws = websocket.WebSocketApp(
+            combined_stream_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close
+        )
+        # Run in a separate thread to not block the main thread
+        self.wst = threading.Thread(target=self.ws.run_forever, kwargs={'ping_interval': self.ping_interval, 'ping_timeout': 10})
+        self.wst.daemon = True
+        self.wst.start()
+
+    def start(self):
+        main_logger.info("Starting WebSocket client...")
+        self.is_running = True
+        self._connect_websocket()
+
+    def stop(self):
+        main_logger.info("Stopping WebSocket client...")
+        self.is_running = False
+        if self.ws:
+            self.ws.close()
+        if self.wst and self.wst.is_alive():
+            self.wst.join(timeout=5) # Wait for thread to finish
+
+    def add_stream(self, stream_name: str, callback: Callable[[Dict[str, Any]], None]):
+        """Adds a new stream to the WebSocket client and reconnects to include it."""
+        if stream_name not in self.streams:
+            self.streams[stream_name] = callback
+            if self.is_running:
+                main_logger.info(f"Adding new stream {stream_name}. Reconnecting WebSocket...")
+                self.stop() # Close current connection
+                self.start() # Reconnect with new stream
+        else:
+            main_logger.warning(f"Stream {stream_name} already exists.")
+
+    def remove_stream(self, stream_name: str):
+        """Removes a stream from the WebSocket client and reconnects."""
+        if stream_name in self.streams:
+            del self.streams[stream_name]
+            if self.is_running:
+                main_logger.info(f"Removing stream {stream_name}. Reconnecting WebSocket...")
+                self.stop()
+                self.start()
+        else:
+            main_logger.warning(f"Stream {stream_name} not found.")

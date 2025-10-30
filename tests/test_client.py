@@ -1,55 +1,107 @@
-
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
+import time
+
+import requests
 from src.client.binance_client import BinanceClient
-from binance.exceptions import BinanceAPIException
+from src.config.settings import settings
+from src.config.constants import BINANCE_FUTURES_TESTNET_URL
+
+# Mock settings for testing
+@pytest.fixture(autouse=True)
+def mock_settings():
+    with patch('src.client.binance_client.settings') as mock_obj:
+        mock_obj.BINANCE_API_KEY = "test_api_key"
+        mock_obj.BINANCE_API_SECRET = "test_api_secret"
+        mock_obj.TESTNET = True
+        yield
 
 @pytest.fixture
-def mock_async_client_create():
-    """Patch the AsyncClient.create to avoid real network calls."""
-    with patch('binance.AsyncClient.create') as mock_create:
-        mock_client = AsyncMock()
-        mock_client.get_server_time = AsyncMock()
-        mock_create.return_value = mock_client
-        yield mock_create
+def binance_client():
+    return BinanceClient()
 
-@pytest.mark.asyncio
-async def test_client_initialization_success(mock_async_client_create):
-    """Test successful client initialization."""
-    client = BinanceClient()
-    result = await client.initialize()
-    assert result is True
-    assert client.client is not None
-    mock_async_client_create.assert_called_once()
-    client.client.get_server_time.assert_called_once()
+def test_binance_client_initialization(binance_client):
+    assert binance_client.base_url == BINANCE_FUTURES_TESTNET_URL
+    assert binance_client.api_key == "test_api_key"
+    assert binance_client.api_secret == "test_api_secret"
+    assert binance_client.session is not None
 
-@pytest.mark.asyncio
-async def test_client_initialization_failure(mock_async_client_create):
-    """Test failed client initialization."""
-    mock_async_client_create.side_effect = BinanceAPIException("Invalid API Key")
-    client = BinanceClient()
-    result = await client.initialize()
-    assert result is False
+@patch('requests.Session.get')
+def test_get_exchange_info_success(mock_get, binance_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"symbols": [{"symbol": "BTCUSDT"}]}
+    mock_response.raise_for_status.return_value = None
+    mock_get.return_value = mock_response
 
-@pytest.mark.asyncio
-async def test_execute_request_retry_logic(mock_async_client_create):
-    """Test the retry logic in the _execute_request wrapper."""
-    client = BinanceClient()
-    await client.initialize()
+    response = binance_client.get_exchange_info()
+    assert response == {"symbols": [{"symbol": "BTCUSDT"}]}
+    mock_get.assert_called_once_with(f"{BINANCE_FUTURES_TESTNET_URL}/fapi/v1/exchangeInfo", params={}, timeout=10)
 
-    # Mock a method on the actual client instance
-    mock_method = AsyncMock(
-        side_effect=[
-            BinanceAPIException("Rate limit exceeded", 429),
-            BinanceAPIException("Rate limit exceeded", 429),
-            {"success": True} # Success on the third attempt
-        ]
-    )
-    
-    # Mock the sleep function to avoid waiting
-    with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
-        result = await client._execute_request(mock_method, "arg1", kwarg1="value1")
+@patch('requests.Session.get')
+def test_get_account_information_success(mock_get, binance_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"assets": [{"asset": "USDT", "walletBalance": "1000"}]}
+    mock_response.raise_for_status.return_value = None
+    mock_get.return_value = mock_response
 
-    assert mock_method.call_count == 3
-    assert mock_sleep.call_count == 2 # Should sleep twice before the successful call
-    assert result == {"success": True}
+    response = binance_client.get_account_information()
+    assert response == {"assets": [{"asset": "USDT", "walletBalance": "1000"}]}
+    assert "timestamp" in mock_get.call_args.kwargs["params"]
+    assert "signature" in mock_get.call_args.kwargs["params"]
+
+@patch('requests.Session.post')
+def test_place_order_success(mock_post, binance_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"orderId": 123, "status": "NEW"}
+    mock_response.raise_for_status.return_value = None
+    mock_post.return_value = mock_response
+
+    response = binance_client.place_order(symbol="BTCUSDT", side="BUY", order_type="MARKET", quantity=0.001)
+    assert response == {"orderId": 123, "status": "NEW"}
+    assert "timestamp" in mock_post.call_args.kwargs["data"]
+    assert "signature" in mock_post.call_args.kwargs["data"]
+
+@patch('requests.Session.get')
+def test_rate_limit_handling(mock_get, binance_client):
+    mock_response_429 = MagicMock()
+    mock_response_429.status_code = 429
+    mock_response_429.headers = {"Retry-After": "1"}
+    mock_response_429.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response_429)
+
+    mock_response_200 = MagicMock()
+    mock_response_200.status_code = 200
+    mock_response_200.json.return_value = {"serverTime": 1678886400000}
+    mock_response_200.raise_for_status.return_value = None
+
+    mock_get.side_effect = [mock_response_429, mock_response_200]
+
+    # We expect a warning log for rate limit and then a successful response
+    with patch('time.sleep') as mock_sleep:
+        response = binance_client.get_server_time()
+        assert response == 1678886400000
+        mock_sleep.assert_called_once_with(1)
+        assert mock_get.call_count == 2
+
+@patch('requests.Session.get')
+def test_invalid_api_credentials(mock_get, binance_client):
+    mock_response_401 = MagicMock()
+    mock_response_401.status_code = 401
+    mock_response_401.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_response_401)
+
+    mock_get.return_value = mock_response_401
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        binance_client.get_account_information()
+
+@patch('requests.Session.get')
+def test_network_timeout_retry(mock_get, binance_client):
+    mock_get.side_effect = [requests.exceptions.Timeout, MagicMock(status_code=200, json=lambda: {"serverTime": 123}, raise_for_status=lambda: None)]
+
+    with patch('time.sleep') as mock_sleep:
+        response = binance_client.get_server_time()
+        assert response == 123
+        assert mock_get.call_count == 2
+        mock_sleep.assert_called_once() # Should sleep after first timeout

@@ -1,76 +1,82 @@
-
 import logging
-import os
 from logging.handlers import RotatingFileHandler
-import colorlog
-from src.config.settings import settings
+import os
+from rich.console import Console
+from rich.logging import RichHandler
+
+# Ensure logs directory exists
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Console for rich logging
+console = Console()
 
 def setup_logging():
-    """Sets up the logging configuration for the application."""
-    if not os.path.exists(settings.LOGS_DIR):
-        os.makedirs(settings.LOGS_DIR)
-
-    # General application logger
-    app_logger = logging.getLogger("trading_bot")
-    app_logger.setLevel(logging.DEBUG)
-    app_handler = RotatingFileHandler(
-        settings.APP_LOG_FILE,
-        maxBytes=settings.LOG_ROTATION_MAX_BYTES,
-        backupCount=settings.LOG_ROTATION_BACKUP_COUNT
+    # Base logger configuration
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            RichHandler(console=console, show_time=True, show_level=True, show_path=False, enable_link_path=False)
+        ]
     )
-    app_formatter = logging.Formatter(settings.LOG_FORMAT)
-    app_handler.setFormatter(app_formatter)
-    app_logger.addHandler(app_handler)
 
-    # Console logger with colors
-    console_handler = colorlog.StreamHandler()
-    console_handler.setFormatter(colorlog.ColoredFormatter(
-        '%(log_color)s%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-        log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'green',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'bold_red',
-        }
-    ))
-    console_handler.setLevel(logging.INFO)
-    app_logger.addHandler(console_handler)
+    # Create specific loggers
+    main_logger = logging.getLogger("trading_bot")
+    orders_logger = logging.getLogger("orders")
+    positions_logger = logging.getLogger("positions")
+    errors_logger = logging.getLogger("errors")
+    api_requests_logger = logging.getLogger("api_requests")
+    performance_logger = logging.getLogger("performance")
 
-    # Specific loggers
-    loggers = {
-        "orders": settings.ORDERS_LOG_FILE,
-        "positions": settings.POSITIONS_LOG_FILE,
-        "errors": settings.ERRORS_LOG_FILE,
-        "api_requests": settings.API_REQUESTS_LOG_FILE,
-        "performance": settings.PERFORMANCE_LOG_FILE,
-    }
+    # Set levels for specific loggers (can be overridden by handlers)
+    main_logger.setLevel(logging.INFO)
+    orders_logger.setLevel(logging.INFO)
+    positions_logger.setLevel(logging.INFO)
+    errors_logger.setLevel(logging.ERROR)
+    api_requests_logger.setLevel(logging.DEBUG)
+    performance_logger.setLevel(logging.INFO)
 
-    for name, log_file in loggers.items():
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.INFO)
-        if name == 'api_requests':
-            logger.setLevel(logging.DEBUG)
-        elif name == 'errors':
-            logger.setLevel(logging.ERROR)
-        
-        handler = RotatingFileHandler(
-            log_file,
-            maxBytes=settings.LOG_ROTATION_MAX_BYTES,
-            backupCount=settings.LOG_ROTATION_BACKUP_COUNT
+    # Define a common formatter for file handlers
+    file_formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Add rotating file handlers for each specific log file
+    def add_rotating_file_handler(logger, filename, level=logging.INFO):
+        file_handler = RotatingFileHandler(
+            os.path.join(LOG_DIR, filename),
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5
         )
-        formatter = logging.Formatter(settings.LOG_FORMAT)
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.propagate = False # Prevent duplication to app_logger
+        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(level)
+        logger.addHandler(file_handler)
 
-# Initialize logging
+    add_rotating_file_handler(main_logger, "trading_bot.log", logging.INFO)
+    add_rotating_file_handler(orders_logger, "orders.log", logging.INFO)
+    add_rotating_file_handler(positions_logger, "positions.log", logging.INFO)
+    add_rotating_file_handler(errors_logger, "errors.log", logging.ERROR)
+    add_rotating_file_handler(api_requests_logger, "api_requests.log", logging.DEBUG)
+    add_rotating_file_handler(performance_logger, "performance.log", logging.INFO)
+
+    # Prevent log messages from being propagated to the root logger multiple times
+    main_logger.propagate = False
+    orders_logger.propagate = False
+    positions_logger.propagate = False
+    errors_logger.propagate = False
+    api_requests_logger.propagate = False
+    performance_logger.propagate = False
+
+# Call setup_logging once to configure all loggers
 setup_logging()
 
-# Get specific loggers
-app_log = logging.getLogger("trading_bot")
-orders_log = logging.getLogger("orders")
-positions_log = logging.getLogger("positions")
-errors_log = logging.getLogger("errors")
-api_log = logging.getLogger("api_requests")
-performance_log = logging.getLogger("performance")
+# Export specific loggers for use throughout the application
+main_logger = logging.getLogger("trading_bot")
+orders_logger = logging.getLogger("orders")
+positions_logger = logging.getLogger("positions")
+errors_logger = logging.getLogger("errors")
+api_requests_logger = logging.getLogger("api_requests")
+performance_logger = logging.getLogger("performance")

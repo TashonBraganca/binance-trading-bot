@@ -67,6 +67,11 @@ class OrderExecutor:
                     order.avg_fill_price = float(response.get("avgPrice", 0.0))
                     order.raw_response = response
                     orders_logger.info(f"Order placed successfully: {order.symbol} {order.side.value} {order.order_type.value} ID: {order.order_id} Status: {order.status}")
+
+                    # CRITICAL: Verify order fill (non-blocking, will update status to FILLED if it completes)
+                    # This ensures strategies can detect when orders actually fill
+                    self.verify_order_fill(order, timeout=30)
+
                     return order
                 except Exception as e:
                     errors_logger.error(f"Error placing order (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}")
