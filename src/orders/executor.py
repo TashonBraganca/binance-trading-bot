@@ -14,6 +14,17 @@ class OrderExecutor:
         self.order_validator = order_validator
         self._order_placement_lock = threading.RLock()  # Serialize order placement to prevent margin conflicts
 
+        # OPTIMIZATION: Metrics for monitoring performance
+        self.metrics = {
+            "total_orders_placed": 0,
+            "successful_orders": 0,
+            "failed_orders": 0,
+            "total_placement_time_ms": 0.0,
+            "last_order_time": None,
+            "total_orders_filled": 0,
+            "total_orders_cancelled": 0,
+        }
+
     def place_order(self, order: Order) -> Optional[Order]:
         """Places an order with pre-execution validation and retry logic.
 
@@ -72,6 +83,11 @@ class OrderExecutor:
                     # This ensures strategies can detect when orders actually fill
                     self.verify_order_fill(order, timeout=30)
 
+                    # Track metrics
+                    self.metrics["successful_orders"] += 1
+                    self.metrics["total_orders_placed"] += 1
+                    self.metrics["last_order_time"] = time.time()
+
                     return order
                 except Exception as e:
                     errors_logger.error(f"Error placing order (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}")
@@ -79,6 +95,8 @@ class OrderExecutor:
                         time.sleep(RETRY_DELAY_SECONDS * (2 ** attempt))  # Exponential backoff
 
             errors_logger.critical(f"Failed to place order after {RETRY_ATTEMPTS} attempts: {order.symbol} {order.side.value} {order.quantity}")
+            self.metrics["failed_orders"] += 1
+            self.metrics["total_orders_placed"] += 1
             return None
 
     def cancel_order(self, symbol: str, order_id: Optional[int] = None, client_order_id: Optional[str] = None) -> bool:
@@ -145,3 +163,19 @@ class OrderExecutor:
         orders_logger.warning(f"Order {order.order_id} for {order.symbol} not filled within {timeout} seconds. Current status: {order.status}")
         order.status = "EXPIRED" # Set status to EXPIRED on timeout
         return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Returns current performance metrics."""
+        metrics = self.metrics.copy()
+        if metrics["total_orders_placed"] > 0:
+            metrics["success_rate"] = (metrics["successful_orders"] / metrics["total_orders_placed"]) * 100
+        else:
+            metrics["success_rate"] = 0.0
+        return metrics
+
+    def log_metrics(self) -> None:
+        """Logs current metrics for monitoring."""
+        metrics = self.get_metrics()
+        main_logger.info(f"Order Executor Metrics: {metrics['total_orders_placed']} total orders, "
+                        f"{metrics['successful_orders']} successful, {metrics['failed_orders']} failed, "
+                        f"Success Rate: {metrics['success_rate']:.1f}%")
