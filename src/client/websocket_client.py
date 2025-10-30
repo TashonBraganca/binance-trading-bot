@@ -101,6 +101,14 @@ class WebSocketClient:
         self.wst.daemon = True
         self.wst.start()
 
+    def is_connected(self) -> bool:
+        """Returns True if WebSocket is actively connected and running."""
+        return (self.is_running and
+                self.ws is not None and
+                self.ws.keep_running and
+                self.wst is not None and
+                self.wst.is_alive())
+
     def start(self):
         main_logger.info("Starting WebSocket client...")
         self.is_running = True

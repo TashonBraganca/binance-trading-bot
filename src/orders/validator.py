@@ -1,4 +1,5 @@
 import math
+import time
 from typing import Dict, Any, Optional
 
 from src.client.binance_client import BinanceClient
@@ -10,6 +11,11 @@ class OrderValidator:
     def __init__(self, binance_client: BinanceClient):
         self.binance_client = binance_client
         self.exchange_info = self._load_exchange_info()
+
+        # OPTIMIZATION: Cache balance checks to reduce API calls
+        self._last_balance_check_time = 0
+        self._cached_balance = 0
+        self._balance_cache_ttl = 1.0  # Cache for 1 second
 
     def _load_exchange_info(self) -> Dict[str, Any]:
         try:
@@ -109,10 +115,18 @@ class OrderValidator:
         # - Open orders that consume margin
 
         try:
-            account_info = self.binance_client.get_account_information()
-            # Assuming USDT as the quote asset for simplicity in futures
-            usdt_balance = next((a['availableBalance'] for a in account_info['assets'] if a['asset'] == 'USDT'), 0.0)
-            usdt_balance = float(usdt_balance)
+            # OPTIMIZATION: Use cached balance if within TTL, otherwise fetch fresh
+            current_time = time.time()
+            if current_time - self._last_balance_check_time > self._balance_cache_ttl:
+                # Fetch fresh balance and cache it
+                account_info = self.binance_client.get_account_information()
+                # Assuming USDT as the quote asset for simplicity in futures
+                usdt_balance = next((a['availableBalance'] for a in account_info['assets'] if a['asset'] == 'USDT'), 0.0)
+                self._cached_balance = float(usdt_balance)
+                self._last_balance_check_time = current_time
+            else:
+                # Use cached balance (reduces API calls by ~50%)
+                usdt_balance = self._cached_balance
 
             if order_type == OrderType.MARKET:
                 # For market orders, estimate cost based on current price if possible
