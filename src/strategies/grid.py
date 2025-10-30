@@ -13,6 +13,7 @@ class GridStrategy(BaseStrategy):
         self.strategy_name = "GRID"
         self.active_grids: Dict[str, Dict[str, Any]] = {}
         self._grid_lock = threading.RLock()  # Reentrant lock for thread-safe grid modifications
+        self._lock_timeout = 5.0  # 5-second timeout to prevent deadlocks
 
     def setup_grid(self, symbol: str, price_range_pct: float, num_grids: int, investment_per_grid: float, 
                    leverage: int = 1, grid_id: Optional[str] = None) -> Optional[str]:
@@ -38,10 +39,17 @@ class GridStrategy(BaseStrategy):
         if grid_id is None:
             grid_id = f"GRID_{symbol}_{int(time.time() * 1000)}"  # Higher precision to avoid collisions
 
-        with self._grid_lock:
+        # Acquire lock with timeout to prevent deadlocks
+        if not self._grid_lock.acquire(timeout=self._lock_timeout):
+            errors_logger.error(f"Could not acquire grid lock within {self._lock_timeout}s. Setup grid operation timed out.")
+            return None
+
+        try:
             if grid_id in self.active_grids:
                 main_logger.warning(f"Grid with ID {grid_id} already exists. Please use a unique ID.")
                 return None
+        finally:
+            self._grid_lock.release()
 
         lower_bound = current_price * (1 - price_range_pct / 2)
         upper_bound = current_price * (1 + price_range_pct / 2)
@@ -96,7 +104,12 @@ class GridStrategy(BaseStrategy):
                 else:
                     main_logger.warning(f"Grid SELL order {i} for {symbol} rejected by risk manager.")
 
-        with self._grid_lock:
+        # Acquire lock with timeout to store grid configuration
+        if not self._grid_lock.acquire(timeout=self._lock_timeout):
+            errors_logger.error(f"Could not acquire grid lock to store configuration. Grid {grid_id} setup incomplete.")
+            return None
+
+        try:
             self.active_grids[grid_id] = {
                 "symbol": symbol,
                 "lower_bound": lower_bound,
@@ -109,12 +122,20 @@ class GridStrategy(BaseStrategy):
                 "sell_orders": sell_orders,
                 "created_at": datetime.utcnow()
             }
+        finally:
+            self._grid_lock.release()
+
         main_logger.info(f"Grid strategy {grid_id} for {symbol} set up successfully.")
         return grid_id
 
     def monitor_grid(self, grid_id: str):
         """Monitors an active grid strategy and places new orders as old ones fill."""
-        with self._grid_lock:
+        # Acquire lock with timeout
+        if not self._grid_lock.acquire(timeout=self._lock_timeout):
+            errors_logger.warning(f"Could not acquire grid lock to monitor grid {grid_id}. Skipping this cycle.")
+            return
+
+        try:
             if grid_id not in self.active_grids:
                 errors_logger.error(f"Grid ID {grid_id} not found.")
                 return
@@ -206,6 +227,8 @@ class GridStrategy(BaseStrategy):
                         order.status = status_data.get("status", order.status)
                         order.filled_quantity = float(status_data.get("executedQty", order.filled_quantity))
                         order.avg_fill_price = float(status_data.get("avgPrice", order.avg_fill_price))
+        finally:
+            self._grid_lock.release()
 
     def _find_closest_grid_level(self, price: float, grid_levels: List[float]) -> int:
         """Find the index of the closest grid level to the given price, handling floating point precision."""
@@ -224,7 +247,12 @@ class GridStrategy(BaseStrategy):
 
     def cancel_grid(self, grid_id: str) -> bool:
         """Cancels all open orders associated with a grid strategy and removes it."""
-        with self._grid_lock:
+        # Acquire lock with timeout
+        if not self._grid_lock.acquire(timeout=self._lock_timeout):
+            errors_logger.error(f"Could not acquire grid lock to cancel grid {grid_id}. Operation timed out.")
+            return False
+
+        try:
             if grid_id not in self.active_grids:
                 errors_logger.error(f"Grid ID {grid_id} not found for cancellation.")
                 return False
@@ -240,6 +268,8 @@ class GridStrategy(BaseStrategy):
             del self.active_grids[grid_id]
             main_logger.info(f"Grid strategy {grid_id} for {symbol} cancelled and removed.")
             return True
+        finally:
+            self._grid_lock.release()
 
     def run(self):
         """Continuously monitors all active grid strategies."""
