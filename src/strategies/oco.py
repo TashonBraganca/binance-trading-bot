@@ -46,9 +46,13 @@ class OCOStrategy(BaseStrategy):
             return None
 
         executed_limit_order = self.order_executor.place_order(limit_order)
-        if not executed_limit_order or executed_limit_order.status != "FILLED":
-            errors_logger.error(f"Failed to place or fill main LIMIT order for OCO: {symbol}")
+        # Check if order was successfully placed (may not be FILLED immediately for limit orders)
+        # Orders can be in NEW, PARTIALLY_FILLED, or FILLED status - all are acceptable as long as they weren't rejected
+        if not executed_limit_order or executed_limit_order.status in ["REJECTED", "CANCELED", "EXPIRED"]:
+            errors_logger.error(f"Failed to place main LIMIT order for OCO: {symbol}. Status: {executed_limit_order.status if executed_limit_order else 'None'}")
             return None
+
+        main_logger.info(f"OCO LIMIT order placed successfully for {symbol}. Status: {executed_limit_order.status}")
 
         # 2. Place the STOP_MARKET order (Stop Loss)
         stop_loss_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
