@@ -10,10 +10,12 @@ from src.risk.manager import RiskManager
 from src.risk.calculator import RiskCalculator
 from src.portfolio.tracker import PortfolioTracker
 from src.portfolio.analytics import PortfolioAnalytics
+from src.portfolio.position_monitor import PositionMonitor
 from src.strategies.twap import TWAPStrategy
 from src.strategies.grid import GridStrategy
 from src.strategies.oco import OCOStrategy
 from src.strategies.trailing_stop import TrailingStopStrategy
+from src.ui.trader_dashboard import TradingDashboard
 from src.config.settings import settings
 from src.config.constants import OrderSide, OrderType, PositionMode, MarginType
 from src.utils.logger import main_logger, errors_logger, orders_logger, positions_logger
@@ -28,6 +30,10 @@ class TradingBot:
         self.risk_manager = RiskManager(self.binance_client, self.risk_calculator)
         self.portfolio_tracker = PortfolioTracker(self.binance_client)
         self.portfolio_analytics = PortfolioAnalytics()
+
+        # Initialize real-time dashboard and position monitoring
+        self.trading_dashboard = TradingDashboard(self.binance_client, self.portfolio_tracker)
+        self.position_monitor = PositionMonitor(self.binance_client, self.order_executor, self.portfolio_tracker)
 
         # Initialize strategies
         self.twap_strategy = TWAPStrategy(self.binance_client, self.order_executor, self.risk_manager, self.portfolio_tracker)
